@@ -192,6 +192,30 @@ pm2 start pm2.json
 
 ## Docker 部署
 
+Docker 部署是推荐的现代化部署方式，提供了环境一致性和便捷的管理。基于实际部署经验，我们提供了经过测试和优化的配置。
+
+### 快速部署 (推荐)
+
+如果您想要快速启动 NideShop，可以按照以下步骤操作：
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/tumobi/nideshop.git
+cd nideshop
+
+# 2. 启动服务
+docker compose up -d --build
+
+# 3. 等待启动完成（约 3-5 分钟）
+docker compose ps
+
+# 4. 访问应用
+# 应用地址：http://localhost:8360
+# API 测试：curl http://localhost:8360/api/index/index
+```
+
+### 详细配置
+
 ### 1. 创建 Dockerfile
 
 在项目根目录创建 `Dockerfile`：
@@ -205,8 +229,8 @@ WORKDIR /app
 # 复制 package.json 和 package-lock.json
 COPY package*.json ./
 
-# 安装依赖
-RUN npm ci --only=production && npm cache clean --force
+# 安装依赖（包含开发依赖，用于编译）
+RUN npm install && npm cache clean --force
 
 # 复制源代码
 COPY . .
@@ -214,26 +238,62 @@ COPY . .
 # 编译应用
 RUN npm run compile
 
-# 创建非 root 用户
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nideshop -u 1001
-
-# 更改文件所有者
-RUN chown -R nideshop:nodejs /app
-USER nideshop
-
 # 暴露端口
 EXPOSE 8360
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node healthcheck.js
 
 # 启动应用
 CMD ["node", "production.js"]
 ```
 
-### 2. 创建健康检查文件
+**重要提示：** 由于项目需要 `babel-cli` 等开发依赖来编译代码，我们在 Docker 构建过程中使用 `npm install` 而不是 `npm ci --only=production`。这确保了编译步骤能够成功执行。
+
+### 2. 修改数据库配置支持环境变量
+
+首先需要修改数据库配置文件来支持环境变量。创建 `src/common/config/database.production.js`：
+
+```javascript
+const mysql = require('think-model-mysql');
+
+module.exports = {
+  handle: mysql,
+  database: process.env.DB_NAME || 'nideshop',
+  prefix: 'nideshop_',
+  encoding: 'utf8mb4',
+  host: process.env.DB_HOST || 'mysql',
+  port: process.env.DB_PORT || '3306',
+  user: process.env.DB_USER || 'nideshop',
+  password: process.env.DB_PASSWORD || 'your_secure_password',
+  dateStrings: true,
+  connectionLimit: 10,
+  acquireTimeout: 60000,
+  timeout: 60000,
+  reconnect: true
+};
+```
+
+同时修改 `src/common/config/config.production.js` 来支持更多环境变量：
+
+```javascript
+// production config, it will load in production environment
+module.exports = {
+  workers: 0,
+  port: process.env.PORT || 8360,
+  weixin: {
+    appid: process.env.WECHAT_APPID || '',
+    secret: process.env.WECHAT_SECRET || '',
+    mch_id: process.env.WECHAT_MCH_ID || '',
+    partner_key: process.env.WECHAT_PARTNER_KEY || '',
+    notify_url: process.env.WECHAT_NOTIFY_URL || ''
+  },
+  express: {
+    appid: process.env.KDNIAO_APPID || '',
+    appkey: process.env.KDNIAO_APPKEY || '',
+    request_url: 'http://api.kdniao.cc/Ebusiness/EbusinessOrderHandle.aspx'
+  }
+};
+```
+
+### 3. 创建健康检查文件
 
 创建 `healthcheck.js`：
 
@@ -242,7 +302,7 @@ const http = require('http');
 
 const options = {
   host: 'localhost',
-  port: 8360,
+  port: process.env.PORT || 8360,
   path: '/api/index/index',
   method: 'GET',
   timeout: 2000
@@ -274,10 +334,7 @@ req.end();
 ### 3. 创建 docker-compose.yml
 
 ```yaml
-version: '3.8'
-
 services:
-  # 应用服务
   nideshop:
     build: .
     ports:
@@ -285,27 +342,22 @@ services:
     environment:
       - NODE_ENV=production
       - DB_HOST=mysql
-      - DB_PORT=3306
       - DB_NAME=nideshop
       - DB_USER=nideshop
-      - DB_PASSWORD=your_secure_password
+      - DB_PASSWORD=nideshop123
     depends_on:
       - mysql
-      - redis
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
-    networks:
-      - nideshop-network
 
-  # MySQL 数据库
   mysql:
     image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_ROOT_PASSWORD: root123
       MYSQL_DATABASE: nideshop
       MYSQL_USER: nideshop
-      MYSQL_PASSWORD: your_secure_password
+      MYSQL_PASSWORD: nideshop123
     ports:
       - "3306:3306"
     volumes:
@@ -313,49 +365,360 @@ services:
       - ./nideshop.sql:/docker-entrypoint-initdb.d/nideshop.sql:ro
     command: --default-authentication-plugin=mysql_native_password
     restart: unless-stopped
-    networks:
-      - nideshop-network
-
-  # Redis 缓存
-  redis:
-    image: redis:6-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-    networks:
-      - nideshop-network
-
-  # Nginx 反向代理
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./www:/usr/share/nginx/html:ro
-      - ./ssl:/etc/nginx/ssl:ro
-    depends_on:
-      - nideshop
-    restart: unless-stopped
-    networks:
-      - nideshop-network
 
 volumes:
   mysql_data:
-  redis_data:
-
-networks:
-  nideshop-network:
-    driver: bridge
 ```
 
-### 4. 创建 Nginx 配置
+**重要说明：** 
+- 移除了过时的 `version` 属性，现代 Docker Compose 不再需要此属性
+- 简化了配置，专注于核心功能
+- 确保数据库正确初始化
 
-创建 `nginx/conf.d/nideshop.conf`：
+### 4. 创建 Docker 相关配置文件
+
+#### MySQL 初始化脚本
+
+创建 `docker/mysql/init.sql`：
+
+```sql
+-- 设置时区
+SET time_zone = '+8:00';
+
+-- 创建额外的索引来优化性能
+USE nideshop;
+
+-- 商品表索引优化
+ALTER TABLE nideshop_goods ADD INDEX idx_category_id (category_id);
+ALTER TABLE nideshop_goods ADD INDEX idx_brand_id (brand_id);
+ALTER TABLE nideshop_goods ADD INDEX idx_is_on_sale (is_on_sale);
+ALTER TABLE nideshop_goods ADD INDEX idx_sort_order (sort_order);
+
+-- 订单表索引优化
+ALTER TABLE nideshop_order ADD INDEX idx_user_id (user_id);
+ALTER TABLE nideshop_order ADD INDEX idx_order_status (order_status);
+ALTER TABLE nideshop_order ADD INDEX idx_add_time (add_time);
+
+-- 购物车索引优化
+ALTER TABLE nideshop_cart ADD INDEX idx_user_id (user_id);
+ALTER TABLE nideshop_cart ADD INDEX idx_session_id (session_id);
+
+-- 创建管理员账户 (用户名: admin, 密码: admin123)
+INSERT IGNORE INTO nideshop_admin (id, username, password, password_salt, last_login_time, last_login_ip, add_time, update_time) 
+VALUES (1, 'admin', '59a57b43b09550b0c50d99cb61d64cdf', 'nideshop_backend', 0, '', 0, 0);
+
+-- 插入基础配置
+INSERT IGNORE INTO nideshop_system (id, key_name, key_value, key_type) VALUES 
+(1, 'mall_name', 'NideShop商城', 'text'),
+(2, 'mall_phone', '400-888-8888', 'text'),
+(3, 'mall_qq', '123456789', 'text'),
+(4, 'mall_address', '上海市普陀区真北路925号', 'text');
+```
+
+#### Redis 配置文件
+
+创建 `docker/redis/redis.conf`：
+
+```conf
+# Redis 配置文件
+
+# 网络配置
+bind 0.0.0.0
+port 6379
+timeout 300
+keepalive 300
+
+# 内存配置
+maxmemory 256mb
+maxmemory-policy allkeys-lru
+
+# 持久化配置
+save 900 1
+save 300 10
+save 60 10000
+
+# 日志配置
+loglevel notice
+logfile ""
+
+# 数据库数量
+databases 16
+
+# AOF 持久化
+appendonly yes
+appendfsync everysec
+
+# 慢查询日志
+slowlog-log-slower-than 10000
+slowlog-max-len 128
+
+# 客户端配置
+tcp-keepalive 60
+tcp-backlog 511
+```
+
+#### Nginx 配置文件
+
+创建 `docker/nginx/nginx.conf`：
+
+```nginx
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    
+    # 日志格式
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    '$request_time $upstream_response_time';
+    
+    access_log /var/log/nginx/access.log main;
+    
+    # 基础配置
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    client_max_body_size 20M;
+    
+    # Gzip 压缩
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/json
+        application/javascript
+        application/xml+rss
+        application/atom+xml
+        image/svg+xml;
+    
+    # 包含站点配置
+    include /etc/nginx/conf.d/*.conf;
+}
+```
+
+创建 `docker/nginx/conf.d/nideshop.conf`：
+
+```nginx
+upstream nideshop_backend {
+    server nideshop:8360 max_fails=3 fail_timeout=30s;
+    keepalive 32;
+}
+
+# HTTP 服务器配置
+server {
+    listen 80;
+    server_name localhost yourdomain.com www.yourdomain.com;
+    
+    # 安全头
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+    add_header Content-Security-Policy "default-src 'self' http: https: data: blob: 'unsafe-inline'" always;
+    
+    # 日志配置
+    access_log /var/log/nginx/nideshop_access.log main;
+    error_log /var/log/nginx/nideshop_error.log;
+    
+    # 根目录
+    root /usr/share/nginx/html;
+    index index.html index.htm;
+    
+    # 静态文件处理
+    location ~* \.(css|js|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        add_header Vary Accept-Encoding;
+        
+        # 跨域配置
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods 'GET, POST, OPTIONS';
+        add_header Access-Control-Allow-Headers 'DNT,X-Mx-ReqToken,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization';
+        
+        try_files $uri $uri/ @backend;
+    }
+    
+    # 上传文件
+    location /uploads/ {
+        expires 1y;
+        add_header Cache-Control "public";
+    }
+    
+    # API 接口代理
+    location /api/ {
+        proxy_pass http://nideshop_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 75s;
+        proxy_send_timeout 300s;
+        
+        # 缓冲区设置
+        proxy_buffering on;
+        proxy_buffer_size 4k;
+        proxy_buffers 8 4k;
+        proxy_busy_buffers_size 8k;
+    }
+    
+    # 管理后台代理
+    location /admin/ {
+        proxy_pass http://nideshop_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+    
+    # 微信验证文件
+    location ~* \.(txt)$ {
+        try_files $uri $uri/ @backend;
+    }
+    
+    # 默认后端处理
+    location @backend {
+        proxy_pass http://nideshop_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # 首页和其他路由
+    location / {
+        try_files $uri $uri/ @backend;
+    }
+    
+    # 健康检查
+    location /health {
+        access_log off;
+        return 200 "healthy\n";
+        add_header Content-Type text/plain;
+    }
+    
+    # 隐藏 Nginx 版本
+    server_tokens off;
+}
+
+# HTTPS 配置示例 (需要 SSL 证书)
+# server {
+#     listen 443 ssl http2;
+#     server_name yourdomain.com www.yourdomain.com;
+#     
+#     ssl_certificate /etc/nginx/ssl/cert.pem;
+#     ssl_certificate_key /etc/nginx/ssl/key.pem;
+#     ssl_session_timeout 1d;
+#     ssl_session_cache shared:SSL:50m;
+#     ssl_session_tickets off;
+#     
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+#     ssl_prefer_server_ciphers off;
+#     
+#     add_header Strict-Transport-Security "max-age=63072000" always;
+#     
+#     # 其余配置与 HTTP 相同...
+# }
+```
+
+### 5. 创建环境配置文件
+
+创建 `.env` 文件：
+
+```bash
+# 基础配置
+NODE_ENV=production
+PORT=8360
+
+# 数据库配置
+DB_HOST=mysql
+DB_PORT=3306
+DB_NAME=nideshop
+DB_USER=nideshop
+DB_PASSWORD=your_secure_password_change_me
+MYSQL_ROOT_PASSWORD=root_password_change_me
+
+# 微信配置
+WECHAT_APPID=your_wechat_appid
+WECHAT_SECRET=your_wechat_secret
+WECHAT_MCH_ID=your_merchant_id
+WECHAT_PARTNER_KEY=your_partner_key
+WECHAT_NOTIFY_URL=https://yourdomain.com/api/pay/notify
+
+# 快递鸟配置
+KDNIAO_APPID=your_kdniao_appid
+KDNIAO_APPKEY=your_kdniao_appkey
+
+# 域名配置
+DOMAIN=yourdomain.com
+
+# 时区设置
+TZ=Asia/Shanghai
+```
+
+创建 `.env.example` 模板文件：
+
+```bash
+# 复制此文件为 .env 并填写实际配置
+
+# 基础配置
+NODE_ENV=production
+PORT=8360
+
+# 数据库配置 - 请修改为强密码
+DB_HOST=mysql
+DB_PORT=3306
+DB_NAME=nideshop
+DB_USER=nideshop
+DB_PASSWORD=请设置强密码
+MYSQL_ROOT_PASSWORD=请设置强密码
+
+# 微信配置 - 从微信公众平台获取
+WECHAT_APPID=请填写微信小程序AppID
+WECHAT_SECRET=请填写微信小程序Secret
+WECHAT_MCH_ID=请填写微信商户号
+WECHAT_PARTNER_KEY=请填写微信支付密钥
+WECHAT_NOTIFY_URL=https://yourdomain.com/api/pay/notify
+
+# 快递鸟配置 - 从快递鸟官网申请
+KDNIAO_APPID=请填写快递鸟用户ID
+KDNIAO_APPKEY=请填写快递鸟API密钥
+
+# 域名配置
+DOMAIN=yourdomain.com
+
+# 时区设置
+TZ=Asia/Shanghai
+```
 
 ```nginx
 upstream nideshop_backend {
@@ -436,26 +799,155 @@ server {
 }
 ```
 
-### 5. 部署命令
+### 6. 部署步骤
+
+#### 准备部署
 
 ```bash
-# 构建并启动所有服务
-docker-compose up -d
+# 1. 克隆项目代码
+git clone https://github.com/tumobi/nideshop.git
+cd nideshop
 
-# 查看服务状态
+# 2. 复制环境配置文件
+cp .env.example .env
+vim .env  # 编辑配置文件，填写实际参数
+
+# 3. 创建必要的目录结构
+mkdir -p docker/mysql docker/redis docker/nginx/conf.d logs/nginx uploads ssl
+
+# 4. 设置文件权限
+chmod +x healthcheck.js
+chmod 644 .env
+chmod -R 755 docker/
+```
+
+#### 首次部署
+
+```bash
+# 1. 克隆项目代码
+git clone https://github.com/tumobi/nideshop.git
+cd nideshop
+
+# 2. 构建并启动所有服务
+docker compose up -d --build
+
+# 3. 等待服务启动完成 (约 60 秒)
+docker compose ps
+
+# 4. 查看服务状态和日志
+docker compose logs -f
+
+# 5. 验证服务是否正常运行
+docker ps
+curl -i http://localhost:8360/api/index/index
+```
+
+#### Docker 部署常见问题和解决方案
+
+**问题1：npm ci 失败，提示需要 package-lock.json**
+```
+Error: The `npm ci` command can only install with an existing package-lock.json
+```
+**解决方案：** 修改 Dockerfile 使用 `npm install` 而不是 `npm ci`，因为项目可能没有 package-lock.json 文件。
+
+**问题2：babel 命令未找到**
+```
+sh: babel: not found
+```
+**解决方案：** 确保 Dockerfile 中安装了所有依赖（包括开发依赖）：
+```dockerfile
+RUN npm install && npm cache clean --force
+```
+而不是：
+```dockerfile
+RUN npm install --only=production && npm cache clean --force
+```
+
+**问题3：Docker Compose 警告版本属性过时**
+```
+WARN: the attribute `version` is obsolete, it will be ignored, please remove it
+```
+**解决方案：** 从 docker-compose.yml 中移除 `version: '3.8'` 行，现代 Docker Compose 不再需要此属性。
+
+**问题4：容器启动失败**
+```bash
+# 查看详细错误信息
+docker compose logs service_name
+
+# 重新构建镜像（清除缓存）
+docker compose build --no-cache
+
+# 清理 Docker 系统
+docker system prune -f
+```
+
+#### 验证部署
+
+```bash
+# 检查所有服务状态
 docker-compose ps
 
-# 查看日志
-docker-compose logs -f nideshop
+# 查看应用日志
+docker-compose logs nideshop
 
-# 停止服务
-docker-compose down
+# 查看 Nginx 访问日志
+docker-compose logs nginx
+
+# 查看数据库日志
+docker-compose logs mysql
+
+# 进入应用容器
+docker-compose exec nideshop sh
+
+# 进入数据库容器
+docker-compose exec mysql mysql -u nideshop -p
+```
+
+#### 常用管理命令
+
+```bash
+# 停止所有服务
+docker compose down
+
+# 停止服务并删除数据卷 (谨慎使用)
+docker compose down -v
 
 # 重新构建镜像
-docker-compose build --no-cache
+docker compose build --no-cache
 
 # 更新服务
-docker-compose pull && docker-compose up -d
+docker compose pull && docker compose up -d
+
+# 重启单个服务
+docker compose restart nideshop
+docker compose restart mysql
+
+# 查看容器资源使用情况
+docker stats
+
+# 清理未使用的资源
+docker system prune -f
+
+# 备份数据
+docker compose exec mysql mysqldump -u nideshop -pnideshop123 nideshop > backup_$(date +%Y%m%d).sql
+
+# 恢复数据
+docker compose exec -T mysql mysql -u nideshop -pnideshop123 nideshop < backup_20250829.sql
+
+# 更新应用 (当有新版本时)
+git pull
+docker compose build nideshop
+docker compose up -d nideshop
+
+# 实时查看服务日志
+docker compose logs -f --tail=100 nideshop
+
+# 监控容器健康状态
+watch 'docker compose ps'
+
+# 进入容器调试
+docker compose exec nideshop /bin/sh
+docker compose exec mysql /bin/bash
 ```
 
 ---
