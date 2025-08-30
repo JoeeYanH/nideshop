@@ -1,0 +1,48 @@
+{
+  "name": "nideshop-test",
+  "version": "1.0.0",
+  "description": "NideShop API Testing Suite",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:public": "jest --testNamePattern='Public API'",
+    "test:api": "jest test/api/",
+    "test:integration": "jest test/integration/",
+    "setup": "node setup.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.8",
+    "jest-html-reporter": "^3.10.2"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "**/*.js",
+      "!**/node_modules/**"
+    ],
+    "testMatch": [
+      "**/test/**/*.test.js"
+    ],
+    "setupFilesAfterEnv": [
+      "<rootDir>/test/setup.js"
+    ],
+    "reporters": [
+      "default",
+      [
+        "jest-html-reporter",
+        {
+          "pageTitle": "NideShop API Test Report",
+          "outputPath": "test-report.html",
+          "includeFailureMsg": true,
+          "includeSuiteFailure": true
+        }
+      ]
+    ]
+  }
+}
